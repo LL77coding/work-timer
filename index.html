@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Daily Work Timer</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-zinc-100 to-zinc-300 dark:from-zinc-900 dark:to-black font-sans antialiased">
+  <div id="app" class="min-h-screen flex items-center justify-center p-4"></div>
+
+  <script>
+    const STORAGE_USER = "workTimer_userId";
+    const STORAGE_DESC_API = "workTimer_descApiUrl";
+    const rk = (u) => "workRecords_" + u;
+    const ck = (u) => "workTimer_caseMap_" + u;
+
+    let state = {
+      userId: "",
+      time: 0,
+      running: false,
+      records: [],
+      caseMap: {},
+      showForm: false,
+      caseName: "",
+      keywords: "",
+      uploadMessage: "",
+      saveLoading: false,
+      saveError: "",
+      descApiUrl: "",
+      timerId: null,
+    };
+
+    function formatTime(t) {
+      const h = String(Math.floor(t / 3600)).padStart(2, "0");
+      const m = String(Math.floor((t % 3600) / 60)).padStart(2, "0");
+      const s = String(t % 60).padStart(2, "0");
+      return h + ":" + m + ":" + s;
+    }
+
+    function escapeHtml(s) {
+      if (s == null) return "";
+      const d = document.createElement("div");
+      d.textContent = String(s);
+      return d.innerHTML;
+    }
+
+    function loadUserData() {
+      if (!state.userId) return;
+      try {
+        const r = localStorage.getItem(rk(state.userId));
+        state.records = r ? JSON.parse(r) : [];
+      } catch {
+        state.records = [];
+      }
+      try {
+        const m = localStorage.getItem(ck(state.userId));
+        state.caseMap = m ? JSON.parse(m) : {};
+      } catch {
+        state.caseMap = {};
+      }
+    }
+
+    function persistRecords() {
+      if (state.userId)
+        localStorage.setItem(rk(state.userId), JSON.stringify(state.records));
+    }
+
+    function persistCaseMap() {
+      if (state.userId)
+        localStorage.setItem(ck(state.userId), JSON.stringify(state.caseMap));
+    }
+
+    function startTimer() {
+      if (state.timerId) clearInterval(state.timerId);
+      state.timerId = setInterval(() => {
+        state.time++;
+        document.getElementById("timer-display").textContent = formatTime(state.time);
+      }, 1000);
+    }
+
+    function stopTimer() {
+      if (state.timerId) {
+        clearInterval(state.timerId);
+        state.timerId = null;
+      }
+    }
+
+    function render() {
+      const app = document.getElementById("app");
+      if (!state.userId) {
+        app.innerHTML = `
+          <div class="backdrop-blur-xl bg-white/40 dark:bg-white/10 shadow-2xl rounded-3xl p-8 w-full max-w-md text-center border border-white/20">
+            <h2 class="text-zinc-700 dark:text-zinc-200 text-lg font-medium mb-2">输入你的名字</h2>
+            <p class="text-zinc-500 dark:text-zinc-400 text-sm mb-4">用于区分不同用户的记录</p>
+            <input id="user-input" type="text" placeholder="例如：张三" class="w-full mb-3 p-3 border border-zinc-300 dark:border-zinc-600 rounded-xl bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100" />
+            <button id="btn-enter" class="w-full py-3 rounded-xl bg-black dark:bg-white text-white dark:text-zinc-900 font-medium">进入</button>
+          </div>`;
+        document.getElementById("btn-enter").onclick = () => {
+          const v = document.getElementById("user-input").value.trim();
+          if (!v) return;
+          localStorage.setItem(STORAGE_USER, v);
+          state.userId = v;
+          state.descApiUrl = localStorage.getItem(STORAGE_DESC_API) || "";
+          loadUserData();
+          render();
+        };
+        return;
+      }
+
+      app.innerHTML = `
+        <div class="backdrop-blur-xl bg-white/40 dark:bg-white/10 shadow-2xl rounded-3xl p-8 sm:p-10 w-full max-w-md text-center border border-white/20">
+          <div class="flex flex-wrap items-center justify-between gap-2 mb-4 text-left">
+            <span class="text-zinc-500 text-sm tracking-wide">Daily Work Timer</span>
+            <div class="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+              <span>当前用户：${escapeHtml(state.userId)}</span>
+              <button type="button" id="btn-switch" class="underline hover:no-underline">切换用户</button>
+            </div>
+          </div>
+          <p class="text-left text-xs text-zinc-500 mb-1">描述接口（可选，需已部署 Next 后端，如 https://xxx.com/api/generate-description）</p>
+          <input id="desc-api" type="url" placeholder="https://你的域名/api/generate-description" class="w-full mb-4 p-2 text-xs border rounded-lg bg-white/80 dark:bg-zinc-800" value="${escapeHtml(state.descApiUrl)}" />
+
+          <div class="mb-6 rounded-xl border-2 border-amber-400 bg-amber-50 dark:bg-amber-950/40 dark:border-amber-500 p-4">
+            <p class="text-amber-800 dark:text-amber-200 text-sm font-medium mb-2">导入案件列表</p>
+            <p class="text-zinc-500 dark:text-zinc-400 text-xs mb-3">Excel 需含「案件简称」「案号」列</p>
+            <label class="cursor-pointer inline-flex px-5 py-3 rounded-xl bg-amber-500 text-white text-sm font-medium">选择 .xlsx
+              <input id="file-xlsx" type="file" accept=".xlsx,.xls" class="hidden" />
+            </label>
+            <p id="upload-msg" class="mt-2 text-sm text-zinc-600">${escapeHtml(state.uploadMessage)}</p>
+          </div>
+
+          <div id="timer-display" class="text-5xl sm:text-6xl font-semibold text-zinc-800 dark:text-white mb-8">${formatTime(state.time)}</div>
+
+          <div class="flex gap-3 justify-center flex-wrap">
+            <button id="btn-start" class="px-6 py-3 rounded-2xl bg-black text-white dark:bg-white dark:text-black shadow-lg disabled:opacity-40" ${state.running ? "disabled" : ""}>Start</button>
+            <button id="btn-pause" class="px-6 py-3 rounded-2xl bg-white/70 dark:bg-white/20 text-zinc-700 dark:text-white shadow-md disabled:opacity-40" ${!state.running ? "disabled" : ""}>Pause</button>
+            <button id="btn-reset" class="px-6 py-3 rounded-2xl bg-white/70 dark:bg-white/20 text-zinc-700 dark:text-white shadow-md">Reset</button>
+          </div>
+
+          ${state.records.length ? `<div class="mt-6"><button id="btn-export" class="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm font-medium">导出 Excel</button></div>` : ""}
+
+          <div id="records-list" class="mt-8 text-left text-sm space-y-2"></div>
+        </div>
+
+        <div id="modal" class="fixed inset-0 flex items-center justify-center bg-black/30 ${state.showForm ? "" : "hidden"}">
+          <div class="bg-white dark:bg-zinc-900 rounded-2xl p-6 w-80 max-w-[90vw] shadow-xl">
+            <h2 class="text-lg font-semibold mb-4 text-zinc-900 dark:text-zinc-100">Work Record</h2>
+            <input id="inp-case" placeholder="案件简称" class="w-full mb-3 p-2 border rounded-lg dark:bg-zinc-800 dark:text-white" value="${escapeHtml(state.caseName)}" />
+            <input id="inp-keywords" placeholder="关键词" class="w-full mb-4 p-2 border rounded-lg dark:bg-zinc-800 dark:text-white" value="${escapeHtml(state.keywords)}" />
+            <button id="btn-save" class="w-full bg-black text-white py-2 rounded-lg disabled:opacity-50" ${state.saveLoading ? "disabled" : ""}>${state.saveLoading ? "生成中…" : "Save"}</button>
+            <p id="save-err" class="mt-2 text-sm text-red-600">${escapeHtml(state.saveError)}</p>
+          </div>
+        </div>`;
+
+      document.getElementById("btn-switch").onclick = () => {
+        localStorage.removeItem(STORAGE_USER);
+        state.userId = "";
+        state.records = [];
+        state.caseMap = {};
+        stopTimer();
+        render();
+      };
+
+      document.getElementById("desc-api").onchange = (e) => {
+        state.descApiUrl = e.target.value.trim();
+        localStorage.setItem(STORAGE_DESC_API, state.descApiUrl);
+      };
+
+      document.getElementById("file-xlsx").onchange = (e) => {
+        const f = e.target.files[0];
+        if (!f) return;
+        state.uploadMessage = "读取中…";
+        document.getElementById("upload-msg").textContent = state.uploadMessage;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          try {
+            const data = new Uint8Array(ev.target.result);
+            const wb = XLSX.read(data, { type: "array" });
+            const sheet = wb.Sheets[wb.SheetNames[0]];
+            const json = XLSX.utils.sheet_to_json(sheet);
+            const map = {};
+            let count = 0;
+            json.forEach((row) => {
+              const n = row["案件简称"];
+              const c = row["案号"];
+              if (n != null && c != null && String(n).trim()) {
+                map[String(n).trim()] = String(c).trim();
+                count++;
+              }
+            });
+            state.caseMap = map;
+            persistCaseMap();
+            state.uploadMessage = "已导入 " + count + " 条案件";
+          } catch (err) {
+            state.uploadMessage = "解析失败：" + (err.message || "");
+          }
+          document.getElementById("upload-msg").textContent = state.uploadMessage;
+          e.target.value = "";
+        };
+        reader.readAsArrayBuffer(f);
+      };
+
+      document.getElementById("btn-start").onclick = () => {
+        state.running = true;
+        startTimer();
+        render();
+      };
+      document.getElementById("btn-pause").onclick = () => {
+        state.running = false;
+        stopTimer();
+        state.showForm = true;
+        render();
+      };
+      document.getElementById("btn-reset").onclick = () => {
+        state.running = false;
+        state.time = 0;
+        stopTimer();
+        render();
+      };
+
+      const list = document.getElementById("records-list");
+      state.records.forEach((r, i) => {
+        const div = document.createElement("div");
+        div.className = "flex items-start gap-2 justify-between border-b border-zinc-200 dark:border-zinc-600 pb-2";
+        const cn = state.caseMap[r.caseName] || "未匹配";
+        div.innerHTML = `
+          <div class="min-w-0 flex-1">
+            <span>${escapeHtml(r.date)}</span> | <span>${escapeHtml(r.caseName)}</span> | CaseNumber: ${escapeHtml(cn)} |
+            <span>${formatTime(r.duration)}</span> | <span>${escapeHtml(r.keywords)}</span>
+            ${r.description ? `<div class="mt-1 text-zinc-600 dark:text-zinc-400 whitespace-pre-wrap break-words">${escapeHtml(r.description)}</div>` : ""}
+          </div>
+          <button type="button" class="del-btn flex-shrink-0 px-2 py-1 text-red-600 text-xs" data-i="${i}">删除</button>`;
+        list.appendChild(div);
+      });
+      list.querySelectorAll(".del-btn").forEach((btn) => {
+        btn.onclick = () => {
+          const i = +btn.getAttribute("data-i");
+          state.records = state.records.filter((_, j) => j !== i);
+          persistRecords();
+          render();
+        };
+      });
+
+      const exp = document.getElementById("btn-export");
+      if (exp) {
+        exp.onclick = () => {
+          const rows = state.records.map((r) => ({
+            Date: r.date,
+            Duration: formatTime(r.duration),
+            CaseNumber: state.caseMap[r.caseName] || "未匹配",
+            Description: r.description || "",
+          }));
+          const ws = XLSX.utils.json_to_sheet(rows);
+          const wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, ws, "Work Records");
+          XLSX.writeFile(wb, "work-records-" + new Date().toISOString().slice(0, 10) + ".xlsx");
+        };
+      }
+
+      document.getElementById("inp-case").oninput = (e) => (state.caseName = e.target.value);
+      document.getElementById("inp-keywords").oninput = (e) => (state.keywords = e.target.value);
+
+      document.getElementById("btn-save").onclick = async () => {
+        state.saveError = "";
+        state.saveLoading = true;
+        render();
+        let description = "";
+        const api = (document.getElementById("desc-api") && document.getElementById("desc-api").value.trim()) || state.descApiUrl;
+        if (api) {
+          try {
+            const res = await fetch(api, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ keywords: state.keywords }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || "生成失败");
+            description = data.description || "";
+          } catch (e) {
+            state.saveError = e.message || "生成描述失败";
+            state.saveLoading = false;
+            render();
+            return;
+          }
+        }
+        state.saveLoading = false;
+        state.records.push({
+          date: new Date().toLocaleDateString(),
+          duration: state.time,
+          caseName: state.caseName,
+          keywords: state.keywords,
+          description,
+        });
+        persistRecords();
+        state.caseName = "";
+        state.keywords = "";
+        state.showForm = false;
+        state.time = 0;
+        stopTimer();
+        render();
+      };
+
+      if (state.running && !state.timerId) startTimer();
+    }
+
+    (function init() {
+      const u = localStorage.getItem(STORAGE_USER);
+      if (u && u.trim()) {
+        state.userId = u.trim();
+        state.descApiUrl = localStorage.getItem(STORAGE_DESC_API) || "";
+        loadUserData();
+      }
+      render();
+    })();
+  </script>
+</body>
+</html>
+
